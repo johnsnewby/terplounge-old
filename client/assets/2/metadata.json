@@ -1,0 +1,12 @@
+{
+  "name": "John F Kennedy swearing-in ceremony and inaugural address, 20 January 1961",
+  "url": "https://www.jfklibrary.org/asset-viewer/archives/JFKWHA/1961/JFKWHA-001/JFKWHA-001",
+  "license": "US Govt",
+  "audio": "main.mp4",
+  "native": "en",
+  "transcript": "en.txt",
+  "translations": [
+    { "de": "de.txt" }
+  ]
+}
+  
