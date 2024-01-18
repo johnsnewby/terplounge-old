@@ -1,8 +1,14 @@
-# Solotandem (or some other name)
+# Terplounge, a tool to practise oral interpretation
 
-This repository contains the various components of the project which is sometimes called 'Terplounge'. It consists of the following components:
+This repository contains the source code to Terplounge, a tool to allow solitary practise of simultaneous interpretation.
 
+## Overview
 
+The basic idea is that the user will listen to some spoken audio in one language (called the 'source' language), translate it into another ('target') language, and speak the translation out loud. A speech-to-text engine will transcribe the target audio, and at the end the user will be shown a comparison of the pre-existing translation, and their own.
+
+## The architecture
+
+![Architecture diagram](/doc/img/architecture.png "The Terploung architecture").
 
 # Installation
 
