@@ -10,6 +10,12 @@ The basic idea is that the user will listen to some spoken audio in one language
 
 ![Architecture diagram](/doc/img/architecture.png "The Terploung architecture").
 
+Terplounge is designed to be usable as a hosted product, or on your machine. Its core is a Rust program which contains a version of the Whisper speech-to-text engine which is optimised to run on normal computers. Users connect to this program, which contains a web server, and stream audio to it, which is converted to text and stored in a session (which is not persisted--i.e. it is gone when the program terminates). The program ships with a minimal interface contained within itself, which exposes the basic features of terplounge.
+
+However the idea is that these simple components are just the start of what can be done. By building a dynamic web site around these core services a rich environment can be created.
+
+By default the system will use Whisper.cpp for its transcription services. This is a
+
 # Installation
 
 ## Installation steps

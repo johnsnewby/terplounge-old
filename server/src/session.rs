@@ -276,7 +276,9 @@ pub async fn user_connected(
             Ok(msg) => msg,
             Err(e) => {
                 log::debug!("websocket error(uid={}): {}", my_id, e);
-                mutate_session(&my_id, |session| session.valid = false).await;
+                mutate_session(&my_id, |session| {
+		    session.sender = None;
+		    session.valid = false}).await;
                 break;
             }
         };
@@ -322,6 +324,9 @@ pub async fn user_closing(uuid: String) {
 }
 
 pub async fn user_disconnected(my_id: usize) {
+    mutate_session(&my_id, |session| {
+	session.sender = None;
+	session.valid = false}).await;
     log::debug!("good bye user: {}", my_id);
 }
 
