@@ -36,14 +36,19 @@ pub async fn serve(translate_tx: Sender<translate::TranslationRequest>) {
         .map(move |params: HashMap<String, String>, ws: warp::ws::Ws| {
             let tx = translate_tx.clone();
             let lang: String = (params.get("lang").unwrap_or(&"de".to_string())).clone();
-
+            let resource: Option<String> = match params.get("resource") {
+                Some(s) => Some(s.clone()),
+                None => None,
+            };
             let sample_rate: u32 = match params.get("rate") {
                 Some(rate) => rate.to_string(),
                 None => "44100".to_string(),
             }
             .parse()
             .unwrap();
-            ws.on_upgrade(move |socket| user_connected(socket, tx.clone(), lang, sample_rate))
+            ws.on_upgrade(move |socket| {
+                user_connected(socket, tx.clone(), lang, sample_rate, resource)
+            })
         });
 
     let close = warp::post().and(warp::path!("close" / String).and_then(async move |uuid| {

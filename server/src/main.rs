@@ -1,4 +1,3 @@
-#![feature(slice_first_last_chunk)]
 #![feature(let_chains)]
 #![feature(async_closure)]
 

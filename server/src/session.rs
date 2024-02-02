@@ -5,6 +5,7 @@ use lazy_static::lazy_static;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::io::Write;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +43,8 @@ pub struct SessionData {
     #[serde(skip_serializing)]
     pub recording_file: Option<String>,
     #[serde(skip_serializing)]
+    pub transcript_file: Option<String>,
+    #[serde(skip_serializing)]
     pub translations: Arc<Mutex<TranslationResponses>>,
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
@@ -53,22 +56,28 @@ impl SessionData {
         translator: Sender<translate::TranslationRequest>,
         language: String,
         sample_rate: u32,
+        resource: Option<String>,
     ) -> Self {
         let uuid = Uuid::new_v4();
-        let recording_file = match std::env::var("RECORDINGS_DIR") {
-            Ok(dir) => Some(format!("{}/{}.wav", dir, uuid)),
-            Err(_) => None,
+        let mut recording_file = None;
+        let mut transcript_file = None;
+        if let Ok(dir) = std::env::var("RECORDINGS_DIR") {
+            let new_dir = format!("{}/{}", dir, uuid);
+            if std::fs::create_dir_all(new_dir.clone()).is_ok() {
+                recording_file = Some(format!("{}/{}.wav", new_dir, uuid));
+                transcript_file = Some(format!("{}/{}.txt", new_dir, uuid));
+            }
         };
-
         Self {
             sender: Some(sender),
             translator,
             language,
             sample_rate,
             uuid,
-            resource: None,
+            resource,
             recording: recording_file.is_some(),
             recording_file,
+            transcript_file,
             valid: true,
             buffer: Vec::new(),
             sequence_number: 0,
@@ -193,7 +202,7 @@ pub async fn user_message(my_id: usize, msg: Message) -> E<()> {
     }
     let data = msg.into_bytes();
     if let Some(session) = get_session(&my_id).await
-        && let Some(_sender) = session.sender
+        && let Some(ref _sender) = session.sender
     {
         let mut v: Vec<f32> = data
             .chunks_exact(4)
@@ -206,12 +215,8 @@ pub async fn user_message(my_id: usize, msg: Message) -> E<()> {
             log::debug!("Sending to translate, pivot={}", pivot);
             let sequence_number = session.sequence_number;
             let payload = session.buffer[..pivot].to_vec();
-            let lang = session.language;
-            append_samples(
-                session.recording_file,
-                session.sample_rate,
-                &session.buffer[..pivot],
-            )?;
+            let lang = session.language.clone();
+            persist_session_data(&session, pivot)?;
             let result = queue::get_queue().enqueue(translate::TranslationRequest {
                 session_id: my_id,
                 sequence_number,
@@ -242,6 +247,7 @@ pub async fn user_connected(
     translate_tx: Sender<translate::TranslationRequest>,
     lang: String,
     sample_rate: u32,
+    resource: Option<String>,
 ) {
     let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
 
@@ -267,7 +273,7 @@ pub async fn user_connected(
         user_ws_tx.close().await.unwrap();
     });
 
-    let mut session = SessionData::new(tx, translate_tx, lang, sample_rate);
+    let mut session = SessionData::new(tx, translate_tx, lang, sample_rate, resource);
     session.send_uuid().unwrap();
     set_session(my_id, session).await;
 
@@ -277,8 +283,10 @@ pub async fn user_connected(
             Err(e) => {
                 log::debug!("websocket error(uid={}): {}", my_id, e);
                 mutate_session(&my_id, |session| {
-		    session.sender = None;
-		    session.valid = false}).await;
+                    session.sender = None;
+                    session.valid = false
+                })
+                .await;
                 break;
             }
         };
@@ -324,10 +332,17 @@ pub async fn user_closing(uuid: String) {
 }
 
 pub async fn user_disconnected(my_id: usize) {
-    mutate_session(&my_id, |session| {
-	session.sender = None;
-	session.valid = false}).await;
-    log::debug!("good bye user: {}", my_id);
+    if let Some(session) = get_session(&my_id).await {
+        record_transcript(&session).expect("error recording transcript");
+        mutate_session(&my_id, |session| {
+            session.sender = None;
+            session.valid = false
+        })
+        .await;
+        log::debug!("good bye user: {}", my_id);
+    } else {
+        log::error!("Failed to find session with id {}", my_id);
+    }
 }
 
 pub async fn expire_sessions() -> E<()> {
@@ -340,11 +355,11 @@ pub async fn expire_sessions() -> E<()> {
     Ok(())
 }
 
-fn append_samples(filename: Option<String>, sample_rate: u32, buffer: &[f32]) -> E<()> {
-    if let Some(filename) = filename {
+fn persist_session_data(session: &SessionData, pivot: usize) -> E<()> {
+    if let Some(filename) = &session.recording_file {
         let spec = hound::WavSpec {
             channels: 1,
-            sample_rate,
+            sample_rate: session.sample_rate,
             bits_per_sample: 32,
             sample_format: hound::SampleFormat::Float,
         };
@@ -354,9 +369,20 @@ fn append_samples(filename: Option<String>, sample_rate: u32, buffer: &[f32]) ->
         } else {
             hound::WavWriter::create(filename, spec)?
         };
-        for sample in buffer {
+        for sample in &session.buffer[..pivot] {
             writer.write_sample(*sample).unwrap();
         }
+    }
+
+    Ok(())
+}
+
+fn record_transcript(session: &SessionData) -> E<()> {
+    if let Some(filename) = &session.transcript_file {
+        let mut file = std::fs::File::create(filename)?;
+        let transcript = session.transcript()?;
+        log::debug!("writing transcript: {}", transcript);
+        file.write_all(transcript.as_bytes())?;
     }
     Ok(())
 }
