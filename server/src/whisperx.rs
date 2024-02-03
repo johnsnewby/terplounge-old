@@ -65,7 +65,7 @@ impl Translator for WhisperX {
             };
 
             match session
-                .sender
+                .transcription_sender_tx
                 .as_ref()
                 .expect("Couldn't find sender!")
                 .send(Message::text(json!(response).to_string()))

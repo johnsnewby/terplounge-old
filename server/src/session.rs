@@ -10,10 +10,14 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::RwLock;
+use tokio::time::timeout;
 use uuid::Uuid;
 use warp::ws::{Message, WebSocket};
+
+const RECV_TIMEOUT_SECONDS: u64 = 15;
 
 use crate::error::E;
 use crate::queue::{self};
@@ -26,8 +30,9 @@ static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionData {
+    id: usize,
     #[serde(skip_serializing)]
-    pub sender: Option<Sender<Message>>,
+    pub transcription_sender_tx: Option<Sender<Message>>,
     #[serde(skip_serializing)]
     pub translator: Sender<translate::TranslationRequest>,
     pub language: String,
@@ -37,6 +42,7 @@ pub struct SessionData {
     pub valid: bool,
     #[serde(skip_serializing)]
     pub buffer: Vec<f32>,
+    pub silence_length: usize,
     pub sequence_number: u32,
     pub last_sequence: Option<u32>,
     pub recording: bool,
@@ -52,7 +58,8 @@ pub struct SessionData {
 
 impl SessionData {
     fn new(
-        sender: Sender<Message>,
+        id: usize,
+        transcription_sender_tx: Sender<Message>,
         translator: Sender<translate::TranslationRequest>,
         language: String,
         sample_rate: u32,
@@ -69,10 +76,12 @@ impl SessionData {
             }
         };
         Self {
-            sender: Some(sender),
+            id,
+            transcription_sender_tx: Some(transcription_sender_tx),
             translator,
             language,
             sample_rate,
+            silence_length: 0usize,
             uuid,
             resource,
             recording: recording_file.is_some(),
@@ -89,7 +98,7 @@ impl SessionData {
     }
 
     pub fn send_uuid(&mut self) -> E<()> {
-        self.sender
+        self.transcription_sender_tx
             .as_ref()
             .ok_or("couldn't find sender")?
             .send(Message::text(
@@ -98,36 +107,35 @@ impl SessionData {
         Ok(())
     }
 
-    pub fn send_translation(&mut self, response: &TranslationResponse) -> E<()> {
-        log::debug!("Sending {:?} to queue", response);
-        self.sender
-            .as_ref()
-            .ok_or("couldn't find sender")?
-            .send(Message::text(json!(response).to_string()))?;
-        self.translations
-            .lock()
-            .unwrap()
-            .deref_mut()
-            .add_translation(&response.clone())?;
-        if let Some(last) = self.last_sequence
-            && self.sequence_number >= last
-        {
-            log::debug!("Last sequence set and reached. Exiting");
-            self.sender = None;
-        }
-        Ok(())
-    }
-
     pub fn transcript(&self) -> E<String> {
         let mutex = self.translations.lock().unwrap();
         let responses: &crate::translate::TranslationResponses = mutex.deref();
         Ok(responses.to_string())
     }
+
+    pub fn finalize_session(&mut self) {
+        self.record_transcript()
+            .expect("error recording transcript");
+        let sender = self.transcription_sender_tx.take();
+        drop(sender);
+        self.valid = false;
+        log::debug!("good bye user: {}", self.id);
+    }
+
+    fn record_transcript(&self) -> E<()> {
+        if let Some(filename) = &self.transcript_file {
+            let mut file = std::fs::File::create(filename)?;
+            let transcript = self.transcript()?;
+            log::debug!("writing transcript: {}", transcript);
+            file.write_all(transcript.as_bytes())?;
+        }
+        Ok(())
+    }
 }
 
 lazy_static! {
     static ref WEBSOCKET_SEND_RUNTIME: Runtime = Builder::new_multi_thread()
-        .worker_threads(10)
+        .worker_threads(2)
         .thread_name("user-runtime")
         .thread_stack_size(3 * 1024 * 1024)
         .build()
@@ -139,6 +147,34 @@ lazy_static! {
         .build()
         .unwrap();
     pub static ref SESSIONS: RwLock<Sessions> = RwLock::new(Sessions::default());
+}
+
+pub fn process_transcription(session_id: usize, response: &TranslationResponse) -> E<()> {
+    let mut session = get_session_sync(&session_id).unwrap();
+    log::debug!(
+        "Sending {:?} to user\nSessionData is {}, last_sequence = {:?}",
+        response,
+        json!(session).to_string(),
+        session.last_sequence,
+    );
+    session
+        .transcription_sender_tx
+        .as_ref()
+        .ok_or("couldn't find sender")?
+        .send(Message::text(json!(response).to_string()))?;
+    session
+        .translations
+        .lock()
+        .unwrap()
+        .deref_mut()
+        .add_translation(&response.clone())?;
+    if let Some(last) = session.last_sequence
+        && session.sequence_number >= last
+    {
+        log::debug!("Last sequence set and reached. Exiting");
+        session.finalize_session();
+    }
+    Ok(())
 }
 
 pub async fn get_session(id: &usize) -> Option<SessionData> {
@@ -195,30 +231,39 @@ async fn remove_session(id: &usize) {
     sessions.remove(id);
 }
 
-pub async fn user_message(my_id: usize, msg: Message) -> E<()> {
+pub async fn user_message(session_id: usize, msg: Message) -> E<()> {
     if !msg.is_binary() {
         // TODO: handle this
         return Ok(());
     }
     let data = msg.into_bytes();
-    if let Some(session) = get_session(&my_id).await
-        && let Some(ref _sender) = session.sender
+    if let Some(session) = get_session(&session_id).await
+        && let Some(ref _transcription_sender_tx) = session.transcription_sender_tx
     {
         let mut v: Vec<f32> = data
             .chunks_exact(4)
             .map(|a| f32::from_le_bytes([a[0], a[1], a[2], a[3]]))
             .collect();
 
-        mutate_session(&my_id, |session| session.buffer.append(&mut v)).await;
+        mutate_session(&session_id, |session| session.buffer.append(&mut v)).await;
 
         if let Some(pivot) = translate::find_silence(&session.buffer, session.sample_rate) {
+            let silence_length = if pivot
+                == crate::translate::SEND_SAMPLE_MINIMUM_TIME_SECONDS * session.sample_rate as usize
+            {
+                log::debug!("Silent for {} samples.", session.silence_length);
+                session.silence_length + pivot
+            } else {
+                0
+            };
+
             log::debug!("Sending to translate, pivot={}", pivot);
             let sequence_number = session.sequence_number;
             let payload = session.buffer[..pivot].to_vec();
             let lang = session.language.clone();
             persist_session_data(&session, pivot)?;
             let result = queue::get_queue().enqueue(translate::TranslationRequest {
-                session_id: my_id,
+                session_id: session_id,
                 sequence_number,
                 payload,
                 lang,
@@ -226,7 +271,8 @@ pub async fn user_message(my_id: usize, msg: Message) -> E<()> {
             match result {
                 Ok(_) => {
                     drop(result);
-                    mutate_session(&my_id, |session| {
+                    mutate_session(&session_id, |session| {
+                        session.silence_length = silence_length;
                         session.buffer = session.buffer[pivot..].to_vec();
                         session.sequence_number += 1;
                     })
@@ -234,7 +280,10 @@ pub async fn user_message(my_id: usize, msg: Message) -> E<()> {
                 }
                 Err(_) => {
                     drop(result);
-                    mutate_session(&my_id, |session| session.sender = None).await;
+                    mutate_session(&session_id, |session| {
+                        session.transcription_sender_tx = None
+                    })
+                    .await;
                 }
             }
         }
@@ -249,100 +298,100 @@ pub async fn user_connected(
     sample_rate: u32,
     resource: Option<String>,
 ) {
-    let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
+    let session_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
 
-    log::debug!("new chat user: {}", my_id);
+    log::debug!("new chat user: {}", session_id);
 
     let (mut user_ws_tx, mut user_ws_rx) = ws.split();
 
-    let (tx, rx) = unbounded();
+    let (transcription_send_tx, transcript_receive_rx) = unbounded();
     (*WEBSOCKET_SEND_RUNTIME).spawn(async move {
-        let mut ok = true;
-        for message in rx.iter() {
+        for message in transcript_receive_rx.iter() {
             log::debug!("Sending message");
-            user_ws_tx
-                .send(message)
-                .unwrap_or_else(|e| {
+            match user_ws_tx.send(message).await {
+                Ok(_) => (),
+                Err(e) => {
                     log::debug!("websocket send error: {}", e);
-                    ok = false;
-                })
-                .await;
-            log::debug!("Message sent");
+                    break;
+                }
+            }
         }
         log::debug!("Exiting loop");
         user_ws_tx.close().await.unwrap();
     });
 
-    let mut session = SessionData::new(tx, translate_tx, lang, sample_rate, resource);
+    let mut session = SessionData::new(
+        session_id,
+        transcription_send_tx,
+        translate_tx,
+        lang,
+        sample_rate,
+        resource,
+    );
     session.send_uuid().unwrap();
-    set_session(my_id, session).await;
+    set_session(session_id, session).await;
 
-    while let Some(result) = user_ws_rx.next().await {
-        let msg = match result {
-            Ok(msg) => msg,
-            Err(e) => {
-                log::debug!("websocket error(uid={}): {}", my_id, e);
-                mutate_session(&my_id, |session| {
-                    session.sender = None;
-                    session.valid = false
-                })
-                .await;
-                break;
-            }
-        };
-        let session = get_session(&my_id).await;
-        match session {
-            Some(s) => {
-                if !s.valid {
+    loop {
+        if let Ok(Some(result)) =
+            timeout(Duration::from_secs(RECV_TIMEOUT_SECONDS), user_ws_rx.next()).await
+        {
+            let msg = match result {
+                Ok(msg) => msg,
+                Err(e) => {
+                    log::debug!("websocket error(uid={}): {}", session_id, e);
+                    break;
+                }
+            };
+
+            let session = get_session(&session_id).await;
+            match session {
+                Some(s) => {
+                    if !s.valid {
+                        break;
+                    }
+                }
+                None => {
+                    log::warn!("Error getting session {}, bailing", session_id);
                     break;
                 }
             }
-            None => {
-                log::warn!("Error getting session {}, bailing", my_id);
-                break;
-            }
+            let _ = user_message(session_id, msg).await;
+        } else {
+            // timed out or error receiving
+            break;
         }
-        let _ = user_message(my_id, msg).await;
     }
-
-    user_disconnected(my_id).await;
+    log::debug!("Marking session {} for closure", session_id);
+    mark_session_for_closure(session_id).await;
+    drop(user_ws_rx);
+    log::debug!("Exiting user_connected event loop");
 }
 
-pub async fn user_closing(uuid: String) {
+pub async fn mark_session_for_closure_uuid(uuid: String) {
     if let Some(session_id) = find_session_with_uuid(&uuid).await {
-        let session = get_session(&session_id).await.unwrap();
-        if session.sequence_number == 0 {
-            mutate_session(&session_id, |session| {
-                session.sender = None;
-            })
-            .await;
-            return;
-        }
-        let last_sequence = session.sequence_number - 1;
-        log::debug!(
-            "Found session {}, marking it for closure at sequence number {}",
-            session_id,
-            last_sequence,
-        );
-        mutate_session(&session_id, |session| {
-            session.last_sequence = Some(last_sequence)
-        })
-        .await;
+        mark_session_for_closure(session_id).await;
     }
 }
 
-pub async fn user_disconnected(my_id: usize) {
-    if let Some(session) = get_session(&my_id).await {
-        record_transcript(&session).expect("error recording transcript");
-        mutate_session(&my_id, |session| {
-            session.sender = None;
-            session.valid = false
+pub async fn mark_session_for_closure(session_id: usize) {
+    let session = get_session(&session_id).await.unwrap();
+    if session.sequence_number == 0 {
+        mutate_session(&session_id, |session| {
+            session.transcription_sender_tx = None;
         })
         .await;
-        log::debug!("good bye user: {}", my_id);
-    } else {
-        log::error!("Failed to find session with id {}", my_id);
+        return;
     }
+    let last_sequence = session.sequence_number - 1;
+    log::debug!(
+        "Found session {}, marking it for closure at sequence number {}",
+        session_id,
+        last_sequence,
+    );
+    mutate_session(&session_id, |session| {
+        session.last_sequence = Some(last_sequence)
+    })
+    .await;
 }
 
 pub async fn expire_sessions() -> E<()> {
@@ -374,15 +423,5 @@ fn persist_session_data(session: &SessionData, pivot: usize) -> E<()> {
         }
     }
 
-    Ok(())
-}
-
-fn record_transcript(session: &SessionData) -> E<()> {
-    if let Some(filename) = &session.transcript_file {
-        let mut file = std::fs::File::create(filename)?;
-        let transcript = session.transcript()?;
-        log::debug!("writing transcript: {}", transcript);
-        file.write_all(transcript.as_bytes())?;
-    }
     Ok(())
 }

@@ -37,7 +37,7 @@ async fn main() {
                 HIGHER_PRIORITY.try_into().unwrap(),
             ))
             .unwrap();
-            let queue = queue::get_queue();
+            let mut queue = queue::get_queue();
             let whisperx = WhisperX::new().unwrap();
             log::debug!("Waiting for WhisperX job");
             queue.subscribe::<WhisperX>(&whisperx).unwrap();

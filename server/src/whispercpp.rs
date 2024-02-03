@@ -1,5 +1,6 @@
 use crate::error::{Er, E};
 use crate::queue;
+use crate::session::process_transcription;
 use crate::translate::{resample, TranslationRequest, TranslationResponse, Translator};
 use lazy_static::lazy_static;
 use std::env;
@@ -28,7 +29,7 @@ impl Translator for WhisperCpp {
             "Sending job {} to translate",
             &translation_request.session_id
         );
-        let mut session = match crate::session::get_session_sync(&translation_request.session_id) {
+        let session = match crate::session::get_session_sync(&translation_request.session_id) {
             Some(x) => x,
             None => {
                 return Err(Er::new(format!(
@@ -83,11 +84,11 @@ impl Translator for WhisperCpp {
                 uuid: session.uuid.to_string(),
             };
 
-            let result = session.send_translation(&response);
+            let result = process_transcription(translation_request.session_id, &response);
             match result {
                 Ok(_) => (),
                 Err(e) => {
-                    log::warn!("Sending failed with error {}", e);
+                    log::warn!("Processing translation failed with error {}", e);
                     crate::session::mutate_session_sync(
                         &translation_request.session_id,
                         |session| session.valid = false,
@@ -116,7 +117,7 @@ pub fn start_translate_pool() -> E<()> {
 
     for i in 0..num_whisper_processes {
         log::debug!("Installing {}", i);
-        let queue = queue.clone();
+        let mut queue = queue.clone();
         set_current_thread_priority(Crossplatform(crate::LOWER_PRIORITY.try_into().unwrap()))
             .unwrap();
         pool.spawn(move || {

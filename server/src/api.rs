@@ -1,6 +1,6 @@
 use askama::Template; // bring trait in scope
 
-use crate::session::{get_sessions, user_closing, user_connected, SessionData};
+use crate::session::{get_sessions, mark_session_for_closure_uuid, user_connected, SessionData};
 use crate::translate;
 
 use crossbeam_channel::Sender;
@@ -52,7 +52,7 @@ pub async fn serve(translate_tx: Sender<translate::TranslationRequest>) {
         });
 
     let close = warp::post().and(warp::path!("close" / String).and_then(async move |uuid| {
-        user_closing(uuid).await;
+        mark_session_for_closure_uuid(uuid).await;
         Ok::<&str, warp::Rejection>("foo")
     }));
 

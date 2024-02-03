@@ -7,7 +7,7 @@ use crate::translate::{TranslationRequest, Translator};
 #[derive(Clone)]
 pub struct TranslationQueue {
     sender: Sender<TranslationRequest>,
-    receiver: Receiver<TranslationRequest>,
+    receiver: Option<Receiver<TranslationRequest>>,
 }
 
 lazy_static! {
@@ -17,7 +17,10 @@ lazy_static! {
 impl TranslationQueue {
     pub fn new() -> E<Self> {
         let (sender, receiver) = unbounded();
-        Ok(Self { sender, receiver })
+        Ok(Self {
+            sender,
+            receiver: Some(receiver),
+        })
     }
 
     pub fn enqueue(&self, request: TranslationRequest) -> E<()> {
@@ -37,12 +40,14 @@ impl TranslationQueue {
         Ok(())
     }
 
-    pub fn subscribe<T: Translator>(&self, translator: &T) -> E<()> {
-        loop {
-            let req = self.receiver.recv()?;
-            log::debug!("Queue length: {}", self.receiver.len());
+    pub fn subscribe<T: Translator>(&mut self, translator: &T) -> E<()> {
+        while let Some(receiver) = &self.receiver {
+            let req = receiver.recv()?;
+            log::debug!("Queue length: {}", receiver.len());
             translator.translate(req)?;
         }
+        log::debug!("Receiver closed.");
+        Ok(())
     }
 }
 
