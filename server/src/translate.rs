@@ -12,14 +12,14 @@ pub trait Translator {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TranslationRequest {
     pub session_id: usize,
-    pub sequence_number: u32,
+    pub sequence_number: usize,
     pub payload: Vec<f32>,
     pub lang: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TranslationResponse {
-    pub sequence_number: u32,
+    pub sequence_number: usize,
     pub translation: String,
     pub segment_number: i32,
     pub segment_start: i64,
@@ -63,6 +63,11 @@ impl TranslationResponses {
         segments[segment_number] = Some(response.clone());
         self.0[sequence_number] = Some(segments);
         Ok(())
+    }
+
+    pub fn translation_count(&self) -> E<usize> {
+        let count = self.0.iter().filter(|x| !x.is_none()).count();
+        Ok(count)
     }
 }
 

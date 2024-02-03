@@ -43,8 +43,8 @@ pub struct SessionData {
     #[serde(skip_serializing)]
     pub buffer: Vec<f32>,
     pub silence_length: usize,
-    pub sequence_number: u32,
-    pub last_sequence: Option<u32>,
+    pub sequence_number: usize,
+    pub last_sequence: Option<usize>,
     pub recording: bool,
     #[serde(skip_serializing)]
     pub recording_file: Option<String>,
@@ -97,6 +97,14 @@ impl SessionData {
         }
     }
 
+    pub fn get_translation_count(&self) -> E<usize> {
+        let mutex = self.translations.lock().unwrap();
+        let responses: &crate::translate::TranslationResponses = mutex.deref();
+        let count = responses.translation_count()?;
+
+        Ok(count)
+    }
+
     pub fn send_uuid(&mut self) -> E<()> {
         self.transcription_sender_tx
             .as_ref()
@@ -116,10 +124,12 @@ impl SessionData {
     pub fn finalize_session(&mut self) {
         self.record_transcript()
             .expect("error recording transcript");
-        let sender = self.transcription_sender_tx.take();
-        drop(sender);
-        self.valid = false;
-        log::debug!("good bye user: {}", self.id);
+        mutate_session_sync(&self.id, |session| {
+            let sender = session.transcription_sender_tx.take();
+            drop(sender);
+            session.valid = false;
+            log::debug!("good bye user: {}", session.id);
+        });
     }
 
     fn record_transcript(&self) -> E<()> {
@@ -169,7 +179,9 @@ pub fn process_transcription(session_id: usize, response: &TranslationResponse) 
         .deref_mut()
         .add_translation(&response.clone())?;
     if let Some(last) = session.last_sequence
+        && let Ok(translation_count) = session.get_translation_count()
         && session.sequence_number >= last
+        && translation_count >= last
     {
         log::debug!("Last sequence set and reached. Exiting");
         session.finalize_session();
@@ -263,7 +275,7 @@ pub async fn user_message(session_id: usize, msg: Message) -> E<()> {
             let lang = session.language.clone();
             persist_session_data(&session, pivot)?;
             let result = queue::get_queue().enqueue(translate::TranslationRequest {
-                session_id: session_id,
+                session_id,
                 sequence_number,
                 payload,
                 lang,
@@ -281,7 +293,8 @@ pub async fn user_message(session_id: usize, msg: Message) -> E<()> {
                 Err(_) => {
                     drop(result);
                     mutate_session(&session_id, |session| {
-                        session.transcription_sender_tx = None
+                        session.transcription_sender_tx = None;
+                        session.valid = false;
                     })
                     .await;
                 }
@@ -346,7 +359,13 @@ pub async fn user_connected(
             let session = get_session(&session_id).await;
             match session {
                 Some(s) => {
-                    if !s.valid {
+                    log::debug!(
+                        "Valid = {}, translation_count = {}, last_sequence = {}",
+                        s.valid,
+                        s.get_translation_count().unwrap_or(0),
+                        s.last_sequence.unwrap_or(0),
+                    );
+                    if !s.valid && s.get_translation_count().unwrap() == s.last_sequence.unwrap() {
                         break;
                     }
                 }
