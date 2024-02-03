@@ -21,6 +21,7 @@ pub struct TranslationRequest {
 pub struct TranslationResponse {
     pub sequence_number: usize,
     pub translation: String,
+    pub num_segments: i32,
     pub segment_number: i32,
     pub segment_start: i64,
     pub segment_end: i64,

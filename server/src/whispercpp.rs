@@ -78,6 +78,7 @@ impl Translator for WhisperCpp {
             let response = TranslationResponse {
                 sequence_number: translation_request.sequence_number,
                 translation: segment,
+                num_segments,
                 segment_number: i,
                 segment_start: start_timestamp,
                 segment_end: end_timestamp,

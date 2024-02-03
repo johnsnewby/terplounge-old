@@ -178,12 +178,15 @@ pub fn process_transcription(session_id: usize, response: &TranslationResponse) 
         .unwrap()
         .deref_mut()
         .add_translation(&response.clone())?;
+
     if let Some(last) = session.last_sequence
-        && let Ok(translation_count) = session.get_translation_count()
         && session.sequence_number >= last
-        && translation_count >= last
+        && response.segment_number == response.num_segments - 1
+        && let Ok(translation_count) = session.get_translation_count()
+        && translation_count >= last + 1
     {
-        log::debug!("Last sequence set and reached. Exiting");
+        log::debug!("Last sequence set and reached. Sleeping til buffer empty and exiting");
+        std::thread::sleep(Duration::from_secs(5));
         session.finalize_session();
     }
     Ok(())
@@ -359,15 +362,15 @@ pub async fn user_connected(
             let session = get_session(&session_id).await;
             match session {
                 Some(s) => {
-                    log::debug!(
-                        "Valid = {}, translation_count = {}, last_sequence = {}",
-                        s.valid,
-                        s.get_translation_count().unwrap_or(0),
-                        s.last_sequence.unwrap_or(0),
-                    );
-                    if !s.valid && s.get_translation_count().unwrap() == s.last_sequence.unwrap() {
-                        break;
-                    }
+                    // log::debug!(
+                    //     "Valid = {}, translation_count = {}, last_sequence = {}",
+                    //     s.valid,
+                    //     s.get_translation_count().unwrap_or(0),
+                    //     s.last_sequence.unwrap_or(0),
+                    // );
+                    // if !s.valid && s.get_translation_count().unwrap() == s.last_sequence.unwrap() {
+                    //     break;
+                    // }
                 }
                 None => {
                     log::warn!("Error getting session {}, bailing", session_id);

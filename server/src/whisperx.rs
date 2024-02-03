@@ -58,6 +58,7 @@ impl Translator for WhisperX {
             let response = TranslationResponse {
                 sequence_number: translation_request.sequence_number,
                 translation: segment.text,
+                num_segments: 1,
                 segment_number: 0,
                 segment_start: (segment.start * 1000f32) as i64,
                 segment_end: (segment.end * 1000f32) as i64,
