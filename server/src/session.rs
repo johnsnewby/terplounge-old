@@ -185,8 +185,10 @@ pub fn process_transcription(session_id: usize, response: &TranslationResponse) 
         && let Ok(translation_count) = session.get_translation_count()
         && translation_count >= last + 1
     {
-        log::debug!("Last sequence set and reached. Sleeping til buffer empty and exiting");
-        std::thread::sleep(Duration::from_secs(5));
+        log::debug!(
+            "Last sequence set and reached. Finalizing session {}.",
+            session_id
+        );
         session.finalize_session();
     }
     Ok(())
@@ -263,6 +265,11 @@ pub async fn user_message(session_id: usize, msg: Message) -> E<()> {
         mutate_session(&session_id, |session| session.buffer.append(&mut v)).await;
 
         if let Some(pivot) = translate::find_silence(&session.buffer, session.sample_rate) {
+            log::debug!(
+                "Comparing {} to {}",
+                pivot,
+                crate::translate::SEND_SAMPLE_MINIMUM_TIME_SECONDS * session.sample_rate as usize
+            );
             let silence_length = if pivot
                 == crate::translate::SEND_SAMPLE_MINIMUM_TIME_SECONDS * session.sample_rate as usize
             {

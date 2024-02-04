@@ -44,7 +44,13 @@ impl TranslationQueue {
         while let Some(receiver) = &self.receiver {
             let req = receiver.recv()?;
             log::debug!("Queue length: {}", receiver.len());
-            translator.translate(req)?;
+            if let Some(session) = crate::session::get_session_sync(&req.session_id)
+                && session.valid
+            {
+                translator.translate(req)?;
+            } else {
+                log::debug!("Skipping no longer valid session {}", req.session_id);
+            }
         }
         log::debug!("Receiver closed.");
         Ok(())
